@@ -1,14 +1,14 @@
 ---
 name: privacy-datamap
-version: 0.7.5
-description: Build a privacy data map (Fides/Fideslang dataset + system manifest) for this repository by reading its schemas and classifying the personal data in them, then land it in Noru. Use when the user wants a data map, a RoPA, a record of processing, a fideslang manifest, or to work out what personal data a codebase actually holds and where.
+version: 0.9.0
+description: Build a privacy data map (Fides/Fideslang dataset + system manifest) for this repository by reading its schemas and evidence-backed supplemental stores, classifying the personal data in them, then landing it in Noru. Use when the user wants a data map, a RoPA, a record of processing, a fideslang manifest, or to work out what personal data a codebase actually holds and where.
 requires:
   bins: ["node", "python3", "git"]
 ---
 
 # privacy-datamap
 
-Read the schemas a repository actually contains, classify the personal data in them against the
+Read the persistent structures a repository actually establishes, classify the personal data in them against the
 Fideslang taxonomy, and land the data map in Noru — with a citation for every field and a named
 owner for every judgement.
 
@@ -25,16 +25,23 @@ arriving next week, and it cannot see the line of code that put them there.
 /privacy-datamap:push   land it, once, idempotently                 (writes — needs confirmation)
 ```
 
-Always in that order.
+Scan includes mandatory agent enrichment. Diff and push each require a separate user request.
 
 ## Structure is derived, meaning is judged
 
 This is the shape of the work, and getting it wrong is the failure mode.
 
 The collector reads **structure**: that a column named `email` exists at `db/schema.sql:12` is a
-parse, and it carries the `file:line` to prove it. It also classifies the field names it can resolve
+parse, and it carries the `file:line` to prove it. A file is evidence, not automatically a dataset:
+the collector normalizes SQL, Drizzle, Prisma and Python ORM observations into logical datastore
+boundaries before it writes the review manifest. It also classifies the field names it can resolve
 by **exact lookup** against a bundled table — `email`, `password_hash`, `last_login_ip`. That is a
 lookup, not an inference, which is what lets the collector be deterministic.
+
+The derived facts and accepted lock retain every observed field. New fields stay verbose while the
+collection is under review. After acceptance, categorized fields use full `fields` entries while
+accepted non-personal names live under the collection's `non_personal_fields`. Their omission from
+Fides output is not omission from the audit trail; the collection signature covers both lists.
 
 Everything else is a judgement, and the collector marks it `needs_review: true` rather than guessing:
 
@@ -45,6 +52,18 @@ Everything else is a judgement, and the collector marks it `needs_review: true` 
 **A manifest with any `needs_review: true` cannot be pushed.** That is the mechanism. Your job is to
 help the user resolve those flags, not to clear them so the push works.
 
+## Trace connection bindings
+
+Use the framework-independent model `runtime → client → connection → datastore`, with
+`client → schema/payload`. Follow actual construction and configuration through wrappers; directory
+placement and schema similarity cannot establish datastore identity. Keep distinct connections
+separate when their destination is unknown. Read the scan command's “Connection relationships”
+and the README's “Connection relationship contract” when proposing or updating these bindings.
+The collector's directory fallback is provisional; automatic runtime client tracing is not yet
+implemented. Complete the wrapper/configuration investigation, then use `--candidate` collection,
+reconciliation and review to show the proposed mapping's actual stores and fields before acceptance.
+Finish the preview queue's enrichment and resolve discovered boundary errors before privacy review.
+
 ## Reconcile before you reason
 
 After every collector run, run `scripts/reconcile.py --repo=<repo> --output=json`. The reconciler,
@@ -52,6 +71,8 @@ not the agent, decides what needs semantic analysis:
 
 - `carry_forward` — preserve the accepted classification. Never reinterpret it.
 - `refresh_evidence` — update the citation only. Never invoke a model for line movement.
+- `identity_migration` — preserve the accepted classification under a unique, evidence-supported
+  logical identity. Do not reinterpret it.
 - an exact-table `add` or `material_change` — the classification is deterministic, although the
   changed collection still needs a new sign-off.
 - `proposal_required` — and only these entries — are the agent's work queue.
@@ -59,12 +80,110 @@ not the agent, decides what needs semantic analysis:
 On a first scan the mode is `bootstrap`. A valid manifest created before locks existed is
 `migration` and must seed its first lock without reclassification. Later scans are `maintenance`.
 Agent suggestions live in `.noru/.cache/privacy-datamap.proposals.json`; they are not decisions and
-cannot update the accepted manifest or lock by themselves.
+cannot update the accepted manifest or lock by themselves. Analyse repository context before asking
+the user, mark each proposal as personal, non-personal, ambiguous or special-category, and present
+the results grouped by dataset and collection. The user can accept or amend a collection group;
+only accepted groups may be patched into the candidate.
+
+Bootstrap has no accepted semantic baseline. An invalid manifest cannot seed descriptions, systems,
+declarations or references. Use `.noru/.cache/privacy-datamap.review.md` as the compact
+collection/family index; the larger proposal JSON is the machine work queue, not the user review.
+
+Read `coverage.migration_gaps`, `coverage.schema_conflicts` and `identity_ambiguities` before
+proposing anything. Declarative schemas take precedence over migration history at the same
+datastore boundary. Migration-only stores replay only `CREATE TABLE`, column add/drop/rename, and
+table drop/rename. Unsupported or inconsistent structural operations omit that datastore rather
+than producing a guessed partial state. This blocking migration-gap rule applies only to
+migration-only datastores; when a canonical schema exists, migrations remain auditable history and
+their replay limitations are not current coverage gaps. An ambiguous old-to-logical identity is
+review work, never permission to choose the closest-looking candidate.
+
+Treat a tracked `drizzle.config.*` with static `schema` and `out` paths as explicit topology
+evidence. The collector resolves both paths relative to that config, keeps the schema boundary as
+the datastore identity, and attaches generated SQL as migration history. Never merge datastores
+from overlapping table names alone.
+
+Runtime systems also come from evidence, not package manifests. Containers, workloads,
+server/worker entrypoints, deployment configuration, or executable start/deploy scripts paired
+with an entrypoint establish a boundary. A library package alone does not. With no confident
+boundary, expect one repository-level fallback system. Never infer processing purpose, data use,
+subjects, or cross-directory datastore access from those markers.
+
+If repository evidence establishes an object store, queue, search index or third-party store that
+no supported schema describes, look for the committed `.noru/privacy-datamap-stores.json`. Its
+datastores and collections cite their integration evidence, and each field must separately cite a
+typed contract, serializer, upload payload or download result. Never derive object fields from a
+provider client call alone. Treat a missing supplement as missing structural coverage to report,
+not permission to copy fields from an older manifest.
 
 When you resolve one, read `references/classification-guide.md` and use the surrounding context —
 the table's name, the other columns, what the service does. If you genuinely cannot tell, say so and
 ask. A confidently wrong data category is worse than a gap, because the gap gets reviewed and the
 wrong answer gets signed.
+
+## Compare observations, not new interpretations
+
+The same repository state and accepted baseline must yield the same structural comparison and
+proposal queue. Keep accepted meaning when evidence is unchanged; refresh moved citations
+mechanically. Register the relevant service, serialization, configuration and transfer code as
+`evidence_dependencies` in the proposed manifest, then seal their fingerprints only after acceptance.
+Follow `commands/scan.md` for the offline fingerprint helper, supported TypeScript/Python selectors,
+and proposal-local dependency targets. Preserve unaffected unaccepted proposals, refresh moved
+citations, and reanalyse only targets marked by `evidence_state`. Complete `discovery_required`
+separately: dependency tracking must never hide a new store, client or processing path.
+
+A changed code fingerprint triggers an investigation of its declared targets, not an automatic
+privacy reclassification. Inspect whether the change affects meaning, propose retain/amend/unresolved,
+and preserve the previous accepted decision until reviewed. Track imported helpers and configuration
+explicitly. Unregistered code and unsupported semantic normalization remain monitoring limitations
+that must be reported; never describe a structural-only baseline as complete processing coverage.
+
+Separate structural changes, evidence investigations, coverage gaps and baseline/tooling maintenance.
+Formatting of supported Python/JSON evidence and citation-only moves must not reopen decisions.
+For other languages, text differences are conservative investigation signals. Repeated scans preserve
+completed proposal work only while its source snapshot, baseline and taxonomy binding match.
+
+## Keep the review focused on meaningful decisions
+
+The core scan outputs are a concise data map (`privacy-datamap.map.md`), a human decision queue
+(`privacy-datamap.review.md`), and a full evidence record (`privacy-datamap.evidence.json`), all in
+the cache. Follow the output contracts and `commands/scan.md`; do not recreate ad hoc field-by-field
+reports. The map summarizes stores, categories, subjects, distinct processing purposes and flows.
+The queue asks about proposed changes, actual ambiguities and human acceptance. Evidence preserves
+every observed field and its citations, reasoning, confidence or carried decision state.
+
+Group the review by explicit `decision_id`, not identical prose or field names. Give each decision
+a single-line `decision_summary` (at most 240 characters); the renderer keeps full rationale in
+evidence. Fields can share one decision while retaining different field-level reasoning. Shared
+`reasoning_groups` are an evidence convenience, not the identity of a human decision.
+
+Collapse non-personal technical fields into coverage counts and collection acceptance. Keep
+authentication, training, billing and provider sharing separate when evidenced. Do not require a
+question for an evidence-backed proposal. Ask only when a missing fact changes a privacy decision;
+state the unknown, the answer needed and the `decision_impact`. Acceptance and the accountable
+owner are requested once for the affected scope, independently of any uncertainty.
+
+Fix incorrect datastore boundaries, collection identities and relationships before privacy review.
+Record unresolved structural errors explicitly and rerun collection/reconciliation after corrections.
+Do not ask a human to approve a structural mistake as a privacy judgment. A blocked review still
+preserves independent analysis and identifies the missing evidence or capability.
+
+## Scan completion
+
+Follow `commands/scan.md` through enrichment, not just collection and reconciliation. Investigate
+all queued fields, processing purposes, subjects, system-to-datastore access, and persistent stores
+outside supported schemas. Populate the separate proposal cache with citations, rationale,
+confidence and explicit unresolved questions, then run `scripts/review.py --repo=<repo> --output=json`.
+Use its generated review to present proposed meaning and outstanding questions by datastore and
+collection. Deterministic checks establish completeness and valid taxonomy values; the agent still
+has to assess whether the evidence supports each proposal.
+
+Report `structure collected` after extraction and reconciliation, `enrichment incomplete` while
+required analysis remains, and `ready for human review` only after the enrichment gate passes with
+coverage gaps visible. Report `accepted` only after human decisions are recorded and the manifest
+validates. A blocked scan names missing evidence or capability and completes independent analysis;
+it must not silently stop at the skeleton. Never invent legal basis, ownership, sign-off or approval.
+Fides export remains limited to an accepted, valid manifest; diff and publication are separate tasks.
 
 ## What must never happen
 
@@ -96,15 +215,20 @@ under `special_category_refs`. **Always surface that list explicitly in your rep
 section. It carries the most risk in the map, it gets half the review horizon, and it is the thing a
 reviewer must not have to go looking for.
 
-## Three committed files, and they are not interchangeable
+## Committed inputs and outputs
 
-- `.noru/privacy-datamap.yml` — the **manifest**. Citations, interpretation blocks, review flags.
-  Commit it; reviewing it in a pull request is the point.
+- `.noru/privacy-datamap-stores.json` — an **optional structural input** for evidence-backed stores
+  that no supported schema describes. Commit it when used; the collector rejects an untracked copy.
+- `.noru/privacy-datamap.yml` — the **manifest**. Privacy-relevant and unresolved field details,
+  compact non-personal names, interpretation blocks and review flags. Commit it; reviewing it in a
+  pull request is the point.
 - `.noru/privacy-datamap.lock.json` — the **accepted observation**. Generated only after a current
   manifest validates. It records stable structural fingerprints and citations, never business
   meaning or agent reasoning. Commit it and do not edit it by hand.
 - `.fides/datamap.yml` — the **export**, in Ethyca's own format, for `fides push` and anything else
-  that reads a Fides manifest. Regenerated on every scan that finds a validated manifest.
+  that reads a Fides manifest. It contains only privacy-relevant fields, drops empty collections
+  and datasets, and repairs system dataset references. Regenerated on every scan that finds a
+  validated manifest.
 
 Edit the manifest, never the export. The next scan overwrites the export without warning, because it
 cannot tell an edit from its own output.
